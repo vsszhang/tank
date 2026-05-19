@@ -9,6 +9,8 @@ A pixel-style browser tank battle game built with React and Canvas. Defend your 
 - Pixel-art menu with an animated tank battle background
 - Canvas-based gameplay loop ⚙️
 - Player movement and shooting 💥
+- Two-player co-op rooms over WebSocket 🤝
+- Internet or LAN room joining with room codes and invite links 🌐
 - Enemy tank spawning, movement, and firing
 - Randomly generated maps for each new game 🧱
 - Protected base area with guaranteed outer defenses 🛡️
@@ -21,6 +23,7 @@ A pixel-style browser tank battle game built with React and Canvas. Defend your 
 - Vite
 - HTML Canvas
 - CSS animations
+- Node.js WebSocket server
 
 ## Getting Started 🚀
 
@@ -42,6 +45,14 @@ Then open:
 http://localhost:5173/
 ```
 
+Start the realtime room server in another terminal:
+
+```bash
+npm run server
+```
+
+The browser connects to `ws://<your-host>:8787` by default, so friends on the same LAN can join with your local IP address and the room code.
+
 ## Available Scripts 📜
 
 ```bash
@@ -55,6 +66,18 @@ npm run build
 ```
 
 Builds the project for production into the `dist/` directory.
+
+```bash
+npm run server
+```
+
+Runs the WebSocket room server on `0.0.0.0:8787`.
+
+```bash
+npm run dev:server
+```
+
+Runs the room server in watch mode for local development.
 
 ```bash
 npm run preview
@@ -78,3 +101,15 @@ Use the **Settings** button on the menu screen to adjust:
 - Bullet speed
 
 Settings apply when a new game starts.
+
+## Multiplayer Rooms 🌐
+
+Use **Online Battle** from the menu to create a room or join with a room code. Rooms support two-player co-op: both players defend the same base, share score and lives, and fight the same enemy wave.
+
+For internet play, deploy the frontend to Netlify and the realtime server to Render or another WebSocket-capable host. Set this Netlify environment variable to your deployed WebSocket URL:
+
+```text
+VITE_WS_URL=wss://your-render-service.onrender.com
+```
+
+The included `render.yaml` can be used as a starting point for a Render Web Service. 🚀

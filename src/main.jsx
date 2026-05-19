@@ -1,469 +1,43 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
+import {
+  DEFAULT_SETTINGS,
+  HEIGHT,
+  WIDTH,
+  drawGame,
+  initialGame,
+  stepGame
+} from './gameEngine.js';
 import './styles.css';
 
-const TILE = 24;
-const COLS = 26;
-const ROWS = 26;
-const WIDTH = COLS * TILE;
-const HEIGHT = ROWS * TILE;
-const PLAYER_SIZE = 22;
-const ENEMY_SIZE = 22;
-const BULLET_SIZE = 5;
-const DEFAULT_SETTINGS = {
-  enemyCount: 10,
-  tankSpeed: 1.6,
-  bulletSpeed: 4.2
-};
-const ENEMY_FIRE_RATE = 0.012;
-const MAX_ENEMIES = 5;
-
-const DIRS = {
-  up: { x: 0, y: -1 },
-  down: { x: 0, y: 1 },
-  left: { x: -1, y: 0 },
-  right: { x: 1, y: 0 }
+const KEY_MAP = {
+  ArrowUp: 'up',
+  KeyW: 'up',
+  ArrowDown: 'down',
+  KeyS: 'down',
+  ArrowLeft: 'left',
+  KeyA: 'left',
+  ArrowRight: 'right',
+  KeyD: 'right'
 };
 
-const ENEMY_SPAWNS = [
-  { x: 1 * TILE + 1, y: 1 * TILE + 1 },
-  { x: 12 * TILE + 1, y: 1 * TILE + 1 },
-  { x: 23 * TILE + 1, y: 1 * TILE + 1 }
-];
-
-const PLAYER_START = { x: 10 * TILE + 1, y: 23 * TILE + 1 };
-const BASE = { x: 12 * TILE, y: 24 * TILE, w: TILE * 2, h: TILE * 2 };
-
-function rectsOverlap(a, b) {
-  return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+function getWsUrl() {
+  if (import.meta.env.VITE_WS_URL) return import.meta.env.VITE_WS_URL;
+  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  return `${protocol}//${window.location.hostname}:8787`;
 }
 
-function clamp(value, min, max) {
-  return Math.max(min, Math.min(max, value));
+function getPlayerToken() {
+  const key = 'tankBattlePlayerToken';
+  const existing = window.localStorage.getItem(key);
+  if (existing) return existing;
+  const token = crypto.randomUUID ? crypto.randomUUID() : `player-${Date.now()}-${Math.random()}`;
+  window.localStorage.setItem(key, token);
+  return token;
 }
 
-function tankRect(tank) {
-  return { x: tank.x, y: tank.y, w: tank.size, h: tank.size };
-}
-
-function blockFromCell(x, y, type) {
-  return {
-    id: `${x}-${y}`,
-    x: x * TILE,
-    y: y * TILE,
-    w: TILE,
-    h: TILE,
-    type,
-    hp: type === 'brick' ? 1 : Infinity
-  };
-}
-
-function generateMap() {
-  const blocks = [];
-  const occupied = new Set();
-  const reserved = new Set();
-  const reserveRect = (x1, y1, x2, y2) => {
-    for (let y = y1; y <= y2; y += 1) {
-      for (let x = x1; x <= x2; x += 1) reserved.add(`${x}-${y}`);
-    }
-  };
-  const reserveTankStart = (point) => {
-    const tileX = Math.floor(point.x / TILE);
-    const tileY = Math.floor(point.y / TILE);
-    reserveRect(tileX - 1, tileY - 1, tileX + 1, tileY + 1);
-  };
-  const addBlock = (x, y, type = 'brick', force = false) => {
-    const key = `${x}-${y}`;
-    if (x < 0 || x > COLS - 1 || y < 0 || y > ROWS - 1 || occupied.has(key)) return false;
-    if (!force && (x < 1 || x > COLS - 2 || y < 1 || y > ROWS - 2 || reserved.has(key))) return false;
-    occupied.add(key);
-    blocks.push(blockFromCell(x, y, type));
-    return true;
-  };
-
-  reserveRect(0, 0, 3, 3);
-  reserveRect(10, 0, 15, 3);
-  reserveRect(22, 0, 25, 3);
-  reserveRect(10, 21, 15, 25);
-  reserveTankStart(PLAYER_START);
-  ENEMY_SPAWNS.forEach(reserveTankStart);
-
-  [
-    [11, 23], [12, 23], [13, 23], [14, 23],
-    [11, 24], [14, 24],
-    [11, 25], [14, 25]
-  ].forEach(([x, y]) => addBlock(x, y, 'brick', true));
-
-  const patterns = [
-    [[0, 0], [1, 0], [0, 1], [1, 1]],
-    [[0, 0], [1, 0], [2, 0]],
-    [[0, 0], [0, 1], [0, 2]],
-    [[0, 0], [1, 0], [1, 1]],
-    [[0, 0], [1, 0]]
-  ];
-
-  let attempts = 0;
-  while (blocks.length < 92 && attempts < 900) {
-    attempts += 1;
-    const pattern = patterns[Math.floor(Math.random() * patterns.length)];
-    const x = 1 + Math.floor(Math.random() * (COLS - 4));
-    const y = 4 + Math.floor(Math.random() * (ROWS - 8));
-    const type = Math.random() < 0.14 ? 'steel' : 'brick';
-    const canPlace = pattern.every(([dx, dy]) => {
-      const key = `${x + dx}-${y + dy}`;
-      return x + dx > 0 && x + dx < COLS - 1 && y + dy > 0 && y + dy < ROWS - 1 && !reserved.has(key) && !occupied.has(key);
-    });
-    if (canPlace) pattern.forEach(([dx, dy]) => addBlock(x + dx, y + dy, type));
-  }
-
-  return blocks;
-}
-
-function makeEnemy(id, level) {
-  const spawn = ENEMY_SPAWNS[id % ENEMY_SPAWNS.length];
-  return {
-    id,
-    x: spawn.x,
-    y: spawn.y,
-    size: ENEMY_SIZE,
-    dir: 'down',
-    hp: level > 2 ? 2 : 1,
-    color: level > 2 ? '#fbbf24' : '#ef4444',
-    moveTimer: 0,
-    fireCooldown: 45 + Math.random() * 70
-  };
-}
-
-function initialGame(settings = DEFAULT_SETTINGS) {
-  return {
-    status: 'ready',
-    level: 1,
-    score: 0,
-    lives: 3,
-    settings,
-    waveLeft: settings.enemyCount,
-    nextEnemyId: 0,
-    spawnCooldown: 0,
-    message: '按 Enter 开始',
-    blocks: generateMap(),
-    player: {
-      x: PLAYER_START.x,
-      y: PLAYER_START.y,
-      size: PLAYER_SIZE,
-      dir: 'up',
-      hp: 1,
-      cooldown: 0,
-      invincible: 120
-    },
-    enemies: [],
-    bullets: [],
-    effects: []
-  };
-}
-
-function resetForNextLevel(game) {
-  return {
-    ...initialGame(game.settings),
-    status: 'playing',
-    level: game.level + 1,
-    score: game.score + 500,
-    lives: game.lives,
-    waveLeft: game.settings.enemyCount + game.level * 2,
-    message: ''
-  };
-}
-
-function canMove(rect, blocks, tanks, ignoreId) {
-  if (rect.x < 0 || rect.y < 0 || rect.x + rect.w > WIDTH || rect.y + rect.h > HEIGHT) return false;
-  if (blocks.some((block) => rectsOverlap(rect, block))) return false;
-  if (tanks.some((tank) => tank.id !== ignoreId && rectsOverlap(rect, tankRect(tank)))) return false;
-  return true;
-}
-
-function moveTank(tank, dir, speed, blocks, tanks) {
-  const vector = DIRS[dir];
-  const next = {
-    ...tank,
-    dir,
-    x: clamp(tank.x + vector.x * speed, 0, WIDTH - tank.size),
-    y: clamp(tank.y + vector.y * speed, 0, HEIGHT - tank.size)
-  };
-  return canMove(tankRect(next), blocks, tanks, tank.id) ? next : { ...tank, dir };
-}
-
-function fireBullet(tank, owner) {
-  const vector = DIRS[tank.dir];
-  const center = {
-    x: tank.x + tank.size / 2 - BULLET_SIZE / 2,
-    y: tank.y + tank.size / 2 - BULLET_SIZE / 2
-  };
-  return {
-    id: `${owner}-${Date.now()}-${Math.random()}`,
-    owner,
-    x: center.x + vector.x * 14,
-    y: center.y + vector.y * 14,
-    w: BULLET_SIZE,
-    h: BULLET_SIZE,
-    dir: tank.dir
-  };
-}
-
-function addBurst(effects, x, y, color = '#f97316') {
-  return [
-    ...effects,
-    { id: `fx-${Date.now()}-${Math.random()}`, x, y, r: 4, life: 20, color }
-  ];
-}
-
-function drawTank(ctx, tank, isPlayer) {
-  const cx = tank.x + tank.size / 2;
-  const cy = tank.y + tank.size / 2;
-  const vector = DIRS[tank.dir];
-  const body = isPlayer ? '#22c55e' : tank.color;
-  const tread = isPlayer ? '#14532d' : '#7f1d1d';
-
-  ctx.save();
-  ctx.translate(cx, cy);
-  if (tank.dir === 'right') ctx.rotate(Math.PI / 2);
-  if (tank.dir === 'down') ctx.rotate(Math.PI);
-  if (tank.dir === 'left') ctx.rotate(-Math.PI / 2);
-
-  ctx.fillStyle = tread;
-  ctx.fillRect(-10, -11, 6, 22);
-  ctx.fillRect(4, -11, 6, 22);
-  ctx.fillStyle = body;
-  ctx.fillRect(-8, -8, 16, 16);
-  ctx.fillStyle = '#f8fafc';
-  ctx.fillRect(-3, -3, 6, 6);
-  ctx.fillStyle = '#0f172a';
-  ctx.fillRect(-2, -18, 4, 14);
-  ctx.restore();
-
-  if (isPlayer && tank.invincible > 0) {
-    ctx.strokeStyle = 'rgba(125, 211, 252, 0.85)';
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.arc(cx + vector.x, cy + vector.y, 17, 0, Math.PI * 2);
-    ctx.stroke();
-  }
-}
-
-function drawGame(ctx, game) {
-  ctx.clearRect(0, 0, WIDTH, HEIGHT);
-  ctx.fillStyle = '#111827';
-  ctx.fillRect(0, 0, WIDTH, HEIGHT);
-
-  ctx.strokeStyle = 'rgba(148, 163, 184, 0.09)';
-  ctx.lineWidth = 1;
-  for (let x = 0; x <= WIDTH; x += TILE) {
-    ctx.beginPath();
-    ctx.moveTo(x, 0);
-    ctx.lineTo(x, HEIGHT);
-    ctx.stroke();
-  }
-  for (let y = 0; y <= HEIGHT; y += TILE) {
-    ctx.beginPath();
-    ctx.moveTo(0, y);
-    ctx.lineTo(WIDTH, y);
-    ctx.stroke();
-  }
-
-  game.blocks.forEach((block) => {
-    if (block.type === 'brick') {
-      ctx.fillStyle = '#b45309';
-      ctx.fillRect(block.x + 1, block.y + 1, block.w - 2, block.h - 2);
-      ctx.fillStyle = 'rgba(255,255,255,0.16)';
-      ctx.fillRect(block.x + 3, block.y + 5, block.w - 6, 3);
-      ctx.fillRect(block.x + 3, block.y + 15, block.w - 6, 3);
-    } else {
-      ctx.fillStyle = '#64748b';
-      ctx.fillRect(block.x + 1, block.y + 1, block.w - 2, block.h - 2);
-      ctx.strokeStyle = '#cbd5e1';
-      ctx.strokeRect(block.x + 4, block.y + 4, block.w - 8, block.h - 8);
-    }
-  });
-
-  ctx.fillStyle = '#f59e0b';
-  ctx.fillRect(BASE.x + 5, BASE.y + 7, 38, 34);
-  ctx.fillStyle = '#7c2d12';
-  ctx.fillRect(BASE.x + 16, BASE.y + 16, 16, 18);
-  ctx.fillStyle = '#fde68a';
-  ctx.fillRect(BASE.x + 20, BASE.y + 9, 8, 10);
-
-  drawTank(ctx, game.player, true);
-  game.enemies.forEach((enemy) => drawTank(ctx, enemy, false));
-
-  game.bullets.forEach((bullet) => {
-    ctx.fillStyle = bullet.owner === 'player' ? '#fef08a' : '#fb7185';
-    ctx.fillRect(bullet.x, bullet.y, bullet.w, bullet.h);
-  });
-
-  game.effects.forEach((effect) => {
-    ctx.strokeStyle = effect.color;
-    ctx.globalAlpha = effect.life / 20;
-    ctx.lineWidth = 3;
-    ctx.beginPath();
-    ctx.arc(effect.x, effect.y, effect.r, 0, Math.PI * 2);
-    ctx.stroke();
-    ctx.globalAlpha = 1;
-  });
-
-  if (game.status !== 'playing') {
-    ctx.fillStyle = 'rgba(15, 23, 42, 0.72)';
-    ctx.fillRect(0, 0, WIDTH, HEIGHT);
-    ctx.fillStyle = '#f8fafc';
-    ctx.font = 'bold 34px system-ui';
-    ctx.textAlign = 'center';
-    ctx.fillText(game.status === 'won' ? '胜利' : game.status === 'over' ? '基地失守' : '坦克大战', WIDTH / 2, HEIGHT / 2 - 18);
-    ctx.font = '18px system-ui';
-    ctx.fillText(game.message, WIDTH / 2, HEIGHT / 2 + 22);
-  }
-}
-
-function stepGame(game, input) {
-  if (game.status !== 'playing') return game;
-
-  let next = {
-    ...game,
-    player: {
-      ...game.player,
-      cooldown: Math.max(0, game.player.cooldown - 1),
-      invincible: Math.max(0, game.player.invincible - 1)
-    },
-    spawnCooldown: Math.max(0, game.spawnCooldown - 1),
-    effects: game.effects
-      .map((effect) => ({ ...effect, life: effect.life - 1, r: effect.r + 1.8 }))
-      .filter((effect) => effect.life > 0)
-  };
-
-  const allTanks = [next.player, ...next.enemies];
-  const activeDir = input.dirs.find((dir) => input.keys.has(dir));
-  if (activeDir) {
-    next.player = moveTank(next.player, activeDir, next.settings.tankSpeed, next.blocks, allTanks);
-  }
-
-  if (input.fire && next.player.cooldown === 0) {
-    next.bullets = [...next.bullets, fireBullet(next.player, 'player')];
-    next.player = { ...next.player, cooldown: 22 };
-  }
-
-  if (next.spawnCooldown === 0 && next.waveLeft > 0 && next.enemies.length < MAX_ENEMIES) {
-    const enemy = makeEnemy(next.nextEnemyId, next.level);
-    const spawnBlocked = [next.player, ...next.enemies].some((tank) => rectsOverlap(tankRect(enemy), tankRect(tank)));
-    if (!spawnBlocked) {
-      next.enemies = [...next.enemies, enemy];
-      next.nextEnemyId += 1;
-      next.waveLeft -= 1;
-      next.spawnCooldown = Math.max(45, 110 - next.level * 7);
-    }
-  }
-
-  const enemiesAfterMove = next.enemies.map((enemy) => {
-    let changed = { ...enemy, fireCooldown: Math.max(0, enemy.fireCooldown - 1), moveTimer: enemy.moveTimer - 1 };
-    const shouldTurn = changed.moveTimer <= 0 || Math.random() < 0.012;
-    if (shouldTurn) {
-      const dx = next.player.x - enemy.x;
-      const dy = next.player.y - enemy.y;
-      const chaseDir = Math.abs(dx) > Math.abs(dy) ? (dx > 0 ? 'right' : 'left') : (dy > 0 ? 'down' : 'up');
-      changed.dir = Math.random() < 0.62 ? chaseDir : Object.keys(DIRS)[Math.floor(Math.random() * 4)];
-      changed.moveTimer = 35 + Math.random() * 85;
-    }
-    const moved = moveTank(changed, changed.dir, next.settings.tankSpeed * 0.48 + next.level * 0.05, next.blocks, [next.player, ...next.enemies]);
-    return moved.x === enemy.x && moved.y === enemy.y && Math.random() < 0.1
-      ? { ...moved, dir: Object.keys(DIRS)[Math.floor(Math.random() * 4)], moveTimer: 20 }
-      : moved;
-  });
-  next.enemies = enemiesAfterMove;
-
-  next.enemies.forEach((enemy) => {
-    if (enemy.fireCooldown === 0 || Math.random() < ENEMY_FIRE_RATE + next.level * 0.0015) {
-      next.bullets.push(fireBullet(enemy, 'enemy'));
-      enemy.fireCooldown = 65 + Math.random() * 90;
-    }
-  });
-
-  const remainingBullets = [];
-  let blocks = [...next.blocks];
-  let enemies = [...next.enemies];
-  let player = next.player;
-  let score = next.score;
-  let lives = next.lives;
-  let status = next.status;
-  let message = next.message;
-  let effects = next.effects;
-
-  next.bullets.forEach((bullet) => {
-    const vector = DIRS[bullet.dir];
-    const moved = {
-      ...bullet,
-      x: bullet.x + vector.x * next.settings.bulletSpeed,
-      y: bullet.y + vector.y * next.settings.bulletSpeed
-    };
-
-    if (moved.x < -8 || moved.y < -8 || moved.x > WIDTH + 8 || moved.y > HEIGHT + 8) return;
-
-    const hitBlock = blocks.find((block) => rectsOverlap(moved, block));
-    if (hitBlock) {
-      effects = addBurst(effects, moved.x, moved.y, hitBlock.type === 'brick' ? '#f59e0b' : '#cbd5e1');
-      if (hitBlock.type === 'brick') blocks = blocks.filter((block) => block.id !== hitBlock.id);
-      return;
-    }
-
-    if (rectsOverlap(moved, BASE)) {
-      status = 'over';
-      message = '按 Enter 重新开始';
-      effects = addBurst(effects, BASE.x + BASE.w / 2, BASE.y + BASE.h / 2, '#facc15');
-      return;
-    }
-
-    if (bullet.owner === 'player') {
-      const enemy = enemies.find((item) => rectsOverlap(moved, tankRect(item)));
-      if (enemy) {
-        effects = addBurst(effects, enemy.x + enemy.size / 2, enemy.y + enemy.size / 2);
-        enemies = enemies
-          .map((item) => (item.id === enemy.id ? { ...item, hp: item.hp - 1 } : item))
-          .filter((item) => item.hp > 0);
-        if (enemy.hp <= 1) score += 100;
-        return;
-      }
-    } else if (player.invincible === 0 && rectsOverlap(moved, tankRect(player))) {
-      effects = addBurst(effects, player.x + player.size / 2, player.y + player.size / 2, '#38bdf8');
-      lives -= 1;
-      if (lives <= 0) {
-        status = 'over';
-        message = '按 Enter 重新开始';
-      } else {
-        player = { ...player, x: PLAYER_START.x, y: PLAYER_START.y, dir: 'up', invincible: 130 };
-      }
-      return;
-    }
-
-    remainingBullets.push(moved);
-  });
-
-  const finishedWave = status === 'playing' && next.waveLeft === 0 && enemies.length === 0;
-  if (finishedWave) {
-    if (next.level >= 3) {
-      status = 'won';
-      message = '按 Enter 再来一局';
-      score += 1000;
-    } else {
-      return resetForNextLevel({ ...next, score, lives });
-    }
-  }
-
-  return {
-    ...next,
-    blocks,
-    enemies,
-    player,
-    bullets: remainingBullets,
-    effects,
-    score,
-    lives,
-    status,
-    message
-  };
+function formatRoomCode(value) {
+  return value.trim().toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 6);
 }
 
 function TankBattle() {
@@ -471,40 +45,70 @@ function TankBattle() {
   const settingsRef = useRef(DEFAULT_SETTINGS);
   const gameRef = useRef(initialGame(settingsRef.current));
   const screenRef = useRef('menu');
+  const modeRef = useRef('solo');
   const keysRef = useRef(new Set());
   const fireRef = useRef(false);
   const animationRef = useRef(null);
+  const socketRef = useRef(null);
+  const onlineRef = useRef({ roomCode: '', slot: 0, playerToken: '' });
   const [snapshot, setSnapshot] = useState(gameRef.current);
   const [screen, setScreen] = useState('menu');
   const [showDetails, setShowDetails] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [showOnline, setShowOnline] = useState(false);
   const [settings, setSettings] = useState(DEFAULT_SETTINGS);
+  const [roomCodeInput, setRoomCodeInput] = useState('');
+  const [onlineStatus, setOnlineStatus] = useState('未连接');
+  const [onlineError, setOnlineError] = useState('');
+  const [roomInfo, setRoomInfo] = useState(null);
+  const [copiedInvite, setCopiedInvite] = useState('');
 
   const input = useMemo(() => ({
-    keys: keysRef.current,
-    dirs: ['up', 'down', 'left', 'right'],
-    get fire() {
-      return fireRef.current;
+    p1: {
+      keys: keysRef.current,
+      get fire() {
+        return fireRef.current;
+      }
     }
   }), []);
 
+  const sendSocket = useCallback((payload) => {
+    const socket = socketRef.current;
+    if (!socket || socket.readyState !== WebSocket.OPEN) return false;
+    socket.send(JSON.stringify(payload));
+    return true;
+  }, []);
+
+  const disconnectOnline = useCallback((notifyServer = true) => {
+    if (notifyServer) sendSocket({ type: 'leaveRoom' });
+    socketRef.current?.close();
+    socketRef.current = null;
+    onlineRef.current = { roomCode: '', slot: 0, playerToken: '' };
+    setRoomInfo(null);
+    setOnlineStatus('未连接');
+  }, [sendSocket]);
+
   const startGame = useCallback(() => {
+    disconnectOnline(false);
+    modeRef.current = 'solo';
     keysRef.current.clear();
     fireRef.current = false;
     screenRef.current = 'game';
     setScreen('game');
     gameRef.current = { ...initialGame(settingsRef.current), status: 'playing', message: '' };
     setSnapshot(gameRef.current);
-  }, []);
+  }, [disconnectOnline]);
 
   const backToMenu = useCallback(() => {
+    disconnectOnline(true);
     keysRef.current.clear();
     fireRef.current = false;
+    modeRef.current = 'solo';
     screenRef.current = 'menu';
     setScreen('menu');
     gameRef.current = initialGame(settingsRef.current);
     setSnapshot(gameRef.current);
-  }, []);
+  }, [disconnectOnline]);
 
   const updateSetting = (key, value) => {
     const next = { ...settingsRef.current, [key]: Number(value) };
@@ -513,6 +117,7 @@ function TankBattle() {
   };
 
   const pauseGame = useCallback(() => {
+    if (modeRef.current === 'online') return;
     const game = gameRef.current;
     if (screenRef.current !== 'game') return;
     if (game.status === 'playing') gameRef.current = { ...game, status: 'paused', message: '已暂停，按 Enter 继续' };
@@ -520,21 +125,153 @@ function TankBattle() {
     setSnapshot(gameRef.current);
   }, []);
 
+  const restartGame = useCallback(() => {
+    if (modeRef.current === 'online') {
+      sendSocket({ type: 'restart', settings: settingsRef.current });
+      return;
+    }
+    startGame();
+  }, [sendSocket, startGame]);
+
+  const connectOnline = useCallback((action, roomCode = '') => {
+    disconnectOnline(false);
+    setOnlineError('');
+    setOnlineStatus('连接中...');
+    const playerToken = getPlayerToken();
+    const socket = new WebSocket(getWsUrl());
+    socketRef.current = socket;
+    onlineRef.current = { roomCode, slot: 0, playerToken };
+
+    socket.addEventListener('open', () => {
+      socket.send(JSON.stringify({
+        type: action,
+        roomCode,
+        playerToken,
+        settings: settingsRef.current
+      }));
+    });
+
+    socket.addEventListener('message', (event) => {
+      let message;
+      try {
+        message = JSON.parse(event.data);
+      } catch {
+        return;
+      }
+
+      if (message.type === 'roomCreated' || message.type === 'joined' || message.type === 'waiting') {
+        onlineRef.current = {
+          roomCode: message.roomCode,
+          slot: message.slot ?? onlineRef.current.slot,
+          playerToken
+        };
+        setRoomInfo({
+          roomCode: message.roomCode,
+          slot: message.slot,
+          players: message.players ?? [],
+          shareUrl: `${window.location.origin}${window.location.pathname}?room=${message.roomCode}`
+        });
+        setOnlineStatus(message.statusText ?? (message.type === 'waiting' ? '等待好友加入' : '已连接'));
+        setShowOnline(false);
+        modeRef.current = 'online';
+        screenRef.current = 'game';
+        setScreen('game');
+      }
+
+      if (message.type === 'snapshot') {
+        modeRef.current = 'online';
+        screenRef.current = 'game';
+        setScreen('game');
+        setRoomInfo((current) => ({
+          ...(current ?? {}),
+          roomCode: message.roomCode,
+          players: message.players ?? [],
+          slot: message.slot ?? current?.slot ?? onlineRef.current.slot,
+          shareUrl: `${window.location.origin}${window.location.pathname}?room=${message.roomCode}`
+        }));
+        setOnlineStatus(message.statusText ?? '联机中');
+        gameRef.current = message.game;
+        setSnapshot(message.game);
+      }
+
+      if (message.type === 'gameOver') {
+        setOnlineStatus(message.statusText ?? '游戏结束');
+      }
+
+      if (message.type === 'error') {
+        setOnlineError(message.message ?? '联机失败');
+        setOnlineStatus('连接失败');
+      }
+    });
+
+    socket.addEventListener('close', () => {
+      if (modeRef.current === 'online') {
+        setOnlineStatus('连接已断开');
+        gameRef.current = { ...gameRef.current, status: 'paused', message: '联机断开，请返回菜单重连' };
+        setSnapshot(gameRef.current);
+      }
+    });
+
+    socket.addEventListener('error', () => {
+      setOnlineError('无法连接联机服务，请确认服务端已启动');
+      setOnlineStatus('连接失败');
+    });
+  }, [disconnectOnline]);
+
+  const createOnlineRoom = () => connectOnline('createRoom');
+  const joinOnlineRoom = () => {
+    const roomCode = formatRoomCode(roomCodeInput);
+    if (!roomCode) {
+      setOnlineError('请输入房间码');
+      return;
+    }
+    connectOnline('joinRoom', roomCode);
+  };
+
+  const copyInvite = async () => {
+    if (!roomInfo?.shareUrl) return;
+    let copied = false;
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(roomInfo.shareUrl);
+        copied = true;
+      }
+    } catch {
+      copied = false;
+    }
+    if (!copied) {
+      try {
+        const field = document.createElement('textarea');
+        field.value = roomInfo.shareUrl;
+        field.setAttribute('readonly', '');
+        field.style.position = 'fixed';
+        field.style.left = '-9999px';
+        document.body.appendChild(field);
+        field.select();
+        copied = document.execCommand('copy');
+        document.body.removeChild(field);
+      } catch {
+        copied = false;
+      }
+    }
+    setCopiedInvite(roomInfo.shareUrl);
+    setOnlineStatus(copied ? '邀请链接已复制' : '复制受限，请手动复制下方链接');
+  };
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const room = formatRoomCode(params.get('room') ?? '');
+    if (room) {
+      setShowOnline(true);
+      setRoomCodeInput(room);
+    }
+  }, []);
+
   useEffect(() => {
     const down = (event) => {
-      const map = {
-        ArrowUp: 'up',
-        KeyW: 'up',
-        ArrowDown: 'down',
-        KeyS: 'down',
-        ArrowLeft: 'left',
-        KeyA: 'left',
-        ArrowRight: 'right',
-        KeyD: 'right'
-      };
-      if (screenRef.current === 'game' && map[event.code]) {
+      if (screenRef.current === 'game' && KEY_MAP[event.code]) {
         event.preventDefault();
-        keysRef.current.add(map[event.code]);
+        keysRef.current.add(KEY_MAP[event.code]);
       }
       if (screenRef.current === 'game' && event.code === 'Space') {
         event.preventDefault();
@@ -544,23 +281,13 @@ function TankBattle() {
         event.preventDefault();
         const game = gameRef.current;
         if (screenRef.current === 'menu') startGame();
-        else if (game.status === 'paused') pauseGame();
-        else if (game.status === 'over' || game.status === 'won') startGame();
+        else if (modeRef.current === 'solo' && game.status === 'paused') pauseGame();
+        else if (game.status === 'over' || game.status === 'won') restartGame();
       }
       if (event.code === 'KeyP') pauseGame();
     };
     const up = (event) => {
-      const map = {
-        ArrowUp: 'up',
-        KeyW: 'up',
-        ArrowDown: 'down',
-        KeyS: 'down',
-        ArrowLeft: 'left',
-        KeyA: 'left',
-        ArrowRight: 'right',
-        KeyD: 'right'
-      };
-      if (map[event.code]) keysRef.current.delete(map[event.code]);
+      if (KEY_MAP[event.code]) keysRef.current.delete(KEY_MAP[event.code]);
       if (event.code === 'Space') fireRef.current = false;
     };
     window.addEventListener('keydown', down);
@@ -569,32 +296,35 @@ function TankBattle() {
       window.removeEventListener('keydown', down);
       window.removeEventListener('keyup', up);
     };
-  }, [pauseGame, startGame]);
+  }, [pauseGame, restartGame, startGame]);
 
   useEffect(() => {
     const tick = () => {
       const ctx = canvasRef.current?.getContext('2d');
       if (screenRef.current === 'game') {
-        gameRef.current = stepGame(gameRef.current, input);
+        if (modeRef.current === 'solo') {
+          gameRef.current = stepGame(gameRef.current, input);
+          setSnapshot(gameRef.current);
+        } else {
+          sendSocket({
+            type: 'input',
+            keys: Array.from(keysRef.current),
+            fire: fireRef.current
+          });
+        }
         if (ctx) drawGame(ctx, gameRef.current);
-        setSnapshot(gameRef.current);
       }
       fireRef.current = false;
       animationRef.current = requestAnimationFrame(tick);
     };
     animationRef.current = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(animationRef.current);
-  }, [input]);
+  }, [input, sendSocket]);
 
-  const pressControl = (key, active) => {
-    if (screenRef.current !== 'game') return;
-    if (key === 'fire') {
-      fireRef.current = active;
-      return;
-    }
-    if (active) keysRef.current.add(key);
-    else keysRef.current.delete(key);
-  };
+  useEffect(() => () => disconnectOnline(true), [disconnectOnline]);
+
+  const totalEnemies = snapshot.waveLeft + snapshot.enemies.length;
+  const isOnline = modeRef.current === 'online';
 
   if (screen === 'menu') {
     return (
@@ -625,6 +355,7 @@ function TankBattle() {
             <p className="menu-subtitle">守住基地，击毁敌军，穿过三轮进攻。</p>
             <div className="menu-actions">
               <button type="button" className="primary-action" onClick={startGame}>开始游戏</button>
+              <button type="button" className="secondary-action" onClick={() => setShowOnline(true)}>联机对战</button>
               <button type="button" className="secondary-action" onClick={() => setShowDetails(true)}>游戏详情</button>
               <button type="button" className="secondary-action" onClick={() => setShowSettings(true)}>设置</button>
             </div>
@@ -653,6 +384,25 @@ function TankBattle() {
                 <span><i className="steel" />钢墙不可击毁</span>
                 <span><i className="base" />保护基地</span>
               </div>
+            </section>
+          </div>
+        )}
+
+        {showOnline && (
+          <div className="modal-backdrop" role="presentation" onMouseDown={() => setShowOnline(false)}>
+            <section className="details-modal online-modal" role="dialog" aria-modal="true" aria-labelledby="online-title" onMouseDown={(event) => event.stopPropagation()}>
+              <div className="modal-head">
+                <h2 id="online-title">联机对战</h2>
+                <button type="button" className="icon-close" aria-label="关闭联机" onClick={() => setShowOnline(false)}>×</button>
+              </div>
+              <p className="modal-copy">创建房间后，把房间码或邀请链接发给好友。第二名玩家加入后会自动开始。</p>
+              <button type="button" className="primary-action full-action" onClick={createOnlineRoom}>创建房间</button>
+              <div className="join-row">
+                <input value={roomCodeInput} placeholder="输入房间码" onChange={(event) => setRoomCodeInput(formatRoomCode(event.target.value))} />
+                <button type="button" className="secondary-action" onClick={joinOnlineRoom}>加入</button>
+              </div>
+              <p className="online-status">{onlineStatus}</p>
+              {onlineError && <p className="online-error">{onlineError}</p>}
             </section>
           </div>
         )}
@@ -690,30 +440,41 @@ function TankBattle() {
     <main className="game-shell game-page">
       <section className="game-topbar">
         <div>
-          <p className="eyebrow">React Canvas Game</p>
+          <p className="eyebrow">{isOnline ? `Room ${roomInfo?.roomCode ?? onlineRef.current.roomCode}` : 'React Canvas Game'}</p>
           <h1>坦克大战</h1>
         </div>
         <div className="stats compact-stats" aria-label="游戏状态">
           <span>得分 <strong>{snapshot.score}</strong></span>
           <span>生命 <strong>{snapshot.lives}</strong></span>
           <span>关卡 <strong>{snapshot.level}</strong></span>
-          <span>敌军 <strong>{snapshot.waveLeft + snapshot.enemies.length}</strong></span>
+          <span>敌军 <strong>{totalEnemies}</strong></span>
         </div>
         <div className="actions">
           <button type="button" onClick={backToMenu}>菜单</button>
-          <button type="button" onClick={startGame}>重开</button>
-          <button type="button" onClick={pauseGame} disabled={snapshot.status === 'ready' || snapshot.status === 'over' || snapshot.status === 'won'}>
+          <button type="button" onClick={restartGame}>重开</button>
+          <button type="button" onClick={pauseGame} disabled={isOnline || snapshot.status === 'ready' || snapshot.status === 'over' || snapshot.status === 'won'}>
             {snapshot.status === 'paused' ? '继续' : '暂停'}
           </button>
         </div>
       </section>
+
+      {isOnline && (
+        <section className="room-strip" aria-label="联机房间状态">
+          <span>房间 <strong>{roomInfo?.roomCode ?? onlineRef.current.roomCode}</strong></span>
+          <span>{onlineStatus}</span>
+          {(roomInfo?.players ?? []).map((player) => (
+            <span key={player.slot}>{player.label}: <strong>{player.connected ? '在线' : '离线'}</strong></span>
+          ))}
+          <button type="button" onClick={copyInvite}>复制邀请链接</button>
+          {copiedInvite && <input className="invite-link" value={copiedInvite} readOnly onFocus={(event) => event.target.select()} aria-label="邀请链接" />}
+        </section>
+      )}
 
       <section className="play-area">
         <div className="canvas-wrap">
           <canvas ref={canvasRef} width={WIDTH} height={HEIGHT} aria-label="坦克大战游戏画布" />
         </div>
       </section>
-
     </main>
   );
 }
