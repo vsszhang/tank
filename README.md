@@ -1,115 +1,131 @@
-# Tank Battle 🕹️
+# 坦克大战 🕹️
 
-A pixel-style browser tank battle game built with React and Canvas. Defend your base, destroy enemy tanks, and survive multiple waves on a randomly generated battlefield. 🎮
+这是一个使用 React + Canvas 构建的像素风网页版坦克大战。玩家需要守住基地、击毁敌军，并在随机生成的战场中通过多轮进攻。🎮
 
-![Tank Battle screenshot](docs/game-screenshot.png)
+![坦克大战截图](docs/game-screenshot.png)
 
-## Features ✨
+## 功能特性 ✨
 
-- Pixel-art menu with an animated tank battle background
-- Canvas-based gameplay loop ⚙️
-- Player movement and shooting 💥
-- Two-player co-op rooms over WebSocket 🤝
-- Internet or LAN room joining with room codes and invite links 🌐
-- Enemy tank spawning, movement, and firing
-- Randomly generated maps for each new game 🧱
-- Protected base area with guaranteed outer defenses 🛡️
-- Configurable enemy count, tank speed, and bullet speed
-- Brick walls, steel walls, score, lives, levels, pause, and restart
+- 像素风游戏菜单和坦克交战背景动画
+- 基于 HTML Canvas 的游戏循环 ⚙️
+- 玩家移动、瞄准和开火 💥
+- 基于 WebSocket 的双人合作房间 🤝
+- 支持通过互联网或局域网使用房间码/邀请链接加入 🌐
+- 敌军坦克生成、移动、追击和射击
+- 每局随机生成地图 🧱
+- 基地外围固定防护 🛡️
+- 可配置敌军数量、坦克速度和炮弹速度
+- 支持砖墙、钢墙、得分、生命、关卡、暂停和重开
 
-## Tech Stack 🧰
+## 技术栈 🧰
 
 - React
 - Vite
 - HTML Canvas
-- CSS animations
-- Node.js WebSocket server
+- CSS 动画
+- Node.js WebSocket 服务端
 
-## Getting Started 🚀
+## 快速开始 🚀
 
-Install dependencies:
+安装依赖：
 
 ```bash
 npm install
 ```
 
-Start the local development server:
+启动前端开发服务器：
 
 ```bash
 npm run dev
 ```
 
-Then open:
+然后打开：
 
 ```text
 http://localhost:5173/
 ```
 
-Start the realtime room server in another terminal:
+如果要使用联机房间，请在另一个终端启动实时房间服务：
 
 ```bash
 npm run server
 ```
 
-The browser connects to `ws://<your-host>:8787` by default, so friends on the same LAN can join with your local IP address and the room code.
+本地开发时，浏览器默认会连接 `ws://<当前主机>:8787`。同一局域网内的好友可以通过你的局域网 IP 和房间码加入。
 
-## Available Scripts 📜
+## 可用脚本 📜
 
 ```bash
 npm run dev
 ```
 
-Runs the game locally with Vite.
+启动 Vite 前端开发服务器。
 
 ```bash
 npm run build
 ```
 
-Builds the project for production into the `dist/` directory.
+构建生产版本，输出到 `dist/` 目录。
 
 ```bash
 npm run server
 ```
 
-Runs the WebSocket room server on `0.0.0.0:8787`.
+启动 WebSocket 房间服务，默认监听 `0.0.0.0:8787`。
 
 ```bash
 npm run dev:server
 ```
 
-Runs the room server in watch mode for local development.
+以 watch 模式启动 WebSocket 房间服务，适合服务端开发调试。
 
 ```bash
 npm run preview
 ```
 
-Serves the production build locally for preview.
+本地预览生产构建结果。
 
-## Controls 🎯
+## 操作方式 🎯
 
-- `WASD` or arrow keys: Move
-- `Space`: Fire 🔥
-- `Enter`: Start or restart after a game ends
-- `P`: Pause or resume
+- `WASD` 或方向键：移动
+- `Space`：开火 🔥
+- `Enter`：开始游戏，或在结束后重新开始
+- `P`：暂停/继续
 
-## Game Settings ⚙️
+## 游戏设置 ⚙️
 
-Use the **Settings** button on the menu screen to adjust:
+在菜单页点击 **设置** 可以调整：
 
-- Enemy count
-- Tank speed
-- Bullet speed
+- 敌军数量
+- 坦克速度
+- 炮弹速度
 
-Settings apply when a new game starts.
+设置会在新一局游戏开始时生效。
 
-## Multiplayer Rooms 🌐
+## 联机房间 🌐
 
-Use **Online Battle** from the menu to create a room or join with a room code. Rooms support two-player co-op: both players defend the same base, share score and lives, and fight the same enemy wave.
+在菜单页点击 **联机对战** 可以创建房间或输入房间码加入。当前联机模式为双人合作：
 
-For internet play, deploy the frontend to Netlify and the realtime server to Render or another WebSocket-capable host. Set this Netlify environment variable to your deployed WebSocket URL:
+- 两名玩家共同守护同一个基地
+- 共享得分、生命、关卡和敌军波次
+- 满 2 人后自动开始游戏
+- 玩家断线时房间会暂停，短时间内可重连
+
+互联网联机需要同时部署：
+
+- 前端：Netlify
+- 实时服务端：Render 或其他支持 WebSocket 的平台
+
+Netlify 需要配置以下环境变量：
 
 ```text
-VITE_WS_URL=wss://your-render-service.onrender.com
+VITE_WS_URL=wss://tank-battle-realtime.onrender.com
 ```
 
-The included `render.yaml` can be used as a starting point for a Render Web Service. 🚀
+本项目已包含 `render.yaml`，可作为 Render Web Service 的部署配置。🚀
+
+## 线上服务
+
+- 前端站点：https://vsszhang-tank.netlify.app
+- WebSocket 服务：`wss://tank-battle-realtime.onrender.com`
+- 服务健康检查：https://tank-battle-realtime.onrender.com/health
