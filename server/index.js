@@ -1,3 +1,4 @@
+import { createServer } from 'node:http';
 import { WebSocketServer } from 'ws';
 import { customAlphabet } from 'nanoid';
 import { DEFAULT_SETTINGS, initialGame, setPlayerConnected, stepGame } from '../src/gameEngine.js';
@@ -205,7 +206,18 @@ function tickRoom(room) {
   }
 }
 
-const wss = new WebSocketServer({ host: '0.0.0.0', port: PORT });
+const server = createServer((request, response) => {
+  if (request.url === '/health') {
+    response.writeHead(200, { 'content-type': 'application/json' });
+    response.end(JSON.stringify({ status: 'ok', rooms: rooms.size }));
+    return;
+  }
+
+  response.writeHead(200, { 'content-type': 'text/plain' });
+  response.end('Tank Battle realtime server');
+});
+
+const wss = new WebSocketServer({ server });
 
 wss.on('connection', (socket) => {
   const client = { socket, room: null, slot: null, playerToken: null };
@@ -235,11 +247,16 @@ wss.on('connection', (socket) => {
   socket.on('error', () => leaveRoom(client));
 });
 
-wss.on('listening', () => {
-  console.log(`Tank Battle WebSocket server listening on 0.0.0.0:${PORT}`);
-});
-
 wss.on('error', (error) => {
   console.error(`Tank Battle WebSocket server failed: ${error.message}`);
+  process.exitCode = 1;
+});
+
+server.listen(PORT, '0.0.0.0', () => {
+  console.log(`Tank Battle realtime server listening on 0.0.0.0:${PORT}`);
+});
+
+server.on('error', (error) => {
+  console.error(`Tank Battle realtime server failed: ${error.message}`);
   process.exitCode = 1;
 });
