@@ -4,7 +4,7 @@ import { customAlphabet } from 'nanoid';
 import { DEFAULT_SETTINGS, initialGame, setPlayerConnected, stepGame } from '../src/gameEngine.js';
 
 const PORT = Number(process.env.PORT ?? 8787);
-const TICK_MS = 50;
+const TICK_MS = 1000 / 30;
 const EMPTY_ROOM_TTL = 5 * 60 * 1000;
 const DISCONNECT_TTL = 2 * 60 * 1000;
 const makeRoomCode = customAlphabet('ABCDEFGHJKLMNPQRSTUVWXYZ23456789', 6);
@@ -35,6 +35,8 @@ function roomSnapshot(room, client) {
     roomCode: room.code,
     slot: client.slot,
     players: serializePlayers(room),
+    lastProcessedSeq: room.lastProcessedSeq[client.slot] ?? 0,
+    ackClientTime: room.ackClientTime[client.slot] ?? null,
     statusText: room.game.status === 'waiting' ? '等待好友加入' : room.game.status === 'paused' ? '队友断线，已暂停' : '联机中',
     game: room.game
   };
@@ -59,7 +61,9 @@ function makeRoom(settings) {
     }),
     players: [null, null],
     clients: new Set(),
-    inputs: [{ keys: [], fire: false }, { keys: [], fire: false }],
+    inputs: [{ keys: [], firePressed: false, seq: 0, clientTime: null }, { keys: [], firePressed: false, seq: 0, clientTime: null }],
+    lastProcessedSeq: [0, 0],
+    ackClientTime: [null, null],
     createdAt: Date.now(),
     emptySince: null,
     timer: null
@@ -138,7 +142,9 @@ function restartRoom(client, message) {
   const room = client.room;
   if (!room) return;
   room.settings = { ...room.settings, ...message.settings };
-  room.inputs = [{ keys: [], fire: false }, { keys: [], fire: false }];
+  room.inputs = [{ keys: [], firePressed: false, seq: 0, clientTime: null }, { keys: [], firePressed: false, seq: 0, clientTime: null }];
+  room.lastProcessedSeq = [0, 0];
+  room.ackClientTime = [null, null];
   room.game = initialGame(room.settings, {
     mode: 'online',
     playerCount: 2,
@@ -153,7 +159,7 @@ function leaveRoom(client) {
   const room = client.room;
   if (!room) return;
 
-  room.inputs[client.slot] = { keys: [], fire: false };
+  room.inputs[client.slot] = { keys: [], firePressed: false, seq: 0, clientTime: null };
   const player = room.players[client.slot];
   if (player?.client === client) {
     room.players[client.slot] = { ...player, client: null, disconnectedAt: Date.now() };
@@ -189,12 +195,17 @@ function tickRoom(room) {
     room.game = { ...room.game, status: 'playing', message: '' };
   }
 
+  room.inputs.forEach((input, slot) => {
+    room.lastProcessedSeq[slot] = input.seq ?? room.lastProcessedSeq[slot] ?? 0;
+    room.ackClientTime[slot] = input.clientTime ?? room.ackClientTime[slot] ?? null;
+  });
+
   room.game = stepGame(room.game, {
     p1: room.inputs[0],
     p2: room.inputs[1]
   });
 
-  room.inputs = room.inputs.map((input) => ({ ...input, fire: false }));
+  room.inputs = room.inputs.map((input) => ({ ...input, firePressed: false }));
   broadcastSnapshot(room);
 
   if (room.game.status === 'over' || room.game.status === 'won') {
@@ -221,6 +232,7 @@ const wss = new WebSocketServer({ server });
 
 wss.on('connection', (socket) => {
   const client = { socket, room: null, slot: null, playerToken: null };
+  socket._socket?.setNoDelay?.(true);
 
   socket.on('message', (raw) => {
     let message;
@@ -234,9 +246,12 @@ wss.on('connection', (socket) => {
     if (message.type === 'createRoom') createRoom(client, message);
     if (message.type === 'joinRoom') joinRoom(client, message);
     if (message.type === 'input' && client.room && client.slot !== null) {
+      const current = client.room.inputs[client.slot];
       client.room.inputs[client.slot] = {
         keys: Array.isArray(message.keys) ? message.keys : [],
-        fire: Boolean(message.fire)
+        firePressed: Boolean(current.firePressed || message.firePressed || message.fire),
+        seq: Number.isFinite(message.seq) ? message.seq : current.seq,
+        clientTime: Number.isFinite(message.clientTime) ? message.clientTime : current.clientTime
       };
     }
     if (message.type === 'restart') restartRoom(client, message);

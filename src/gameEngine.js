@@ -215,7 +215,7 @@ function moveTank(tank, dir, speed, blocks, tanks) {
   return canMove(tankRect(next), blocks, tanks, tank.id) ? next : { ...tank, dir };
 }
 
-function fireBullet(tank, owner) {
+function fireBullet(tank, owner, options = {}) {
   const vector = DIRS[tank.dir];
   const center = {
     x: tank.x + tank.size / 2 - BULLET_SIZE / 2,
@@ -228,7 +228,8 @@ function fireBullet(tank, owner) {
     y: center.y + vector.y * 14,
     w: BULLET_SIZE,
     h: BULLET_SIZE,
-    dir: tank.dir
+    dir: tank.dir,
+    predicted: Boolean(options.predicted)
   };
 }
 
@@ -248,7 +249,7 @@ function hasInputKey(input, dir) {
 }
 
 function shouldFire(input) {
-  return Boolean(input?.fire);
+  return Boolean(input?.fire || input?.firePressed);
 }
 
 function nearestTarget(enemy, players) {
@@ -411,6 +412,59 @@ export function stepGame(game, inputs = {}) {
     lives,
     status,
     message
+  };
+}
+
+export function predictLocalPlayer(game, slot, input = {}) {
+  if (game.status !== 'playing') return game;
+
+  const playerIndex = game.players.findIndex((player) => player.slot === slot);
+  if (playerIndex === -1 || game.players[playerIndex]?.connected === false) return game;
+
+  const players = game.players.map((player, index) => (
+    index === playerIndex
+      ? {
+          ...player,
+          cooldown: Math.max(0, player.cooldown - 1),
+          invincible: Math.max(0, player.invincible - 1)
+        }
+      : player
+  ));
+
+  const player = players[playerIndex];
+  const activeDir = DIR_ORDER.find((dir) => hasInputKey(input, dir));
+  const allTanks = [...players, ...game.enemies];
+  let changed = activeDir ? moveTank(player, activeDir, game.settings.tankSpeed, game.blocks, allTanks) : player;
+  let bullets = game.bullets;
+
+  if (shouldFire(input) && changed.cooldown === 0) {
+    bullets = [...bullets, fireBullet(changed, changed.id, { predicted: true })];
+    changed = { ...changed, cooldown: 22 };
+  }
+
+  players[playerIndex] = changed;
+
+  const movedBullets = bullets
+    .map((bullet) => {
+      if (!bullet.predicted || bullet.owner !== changed.id) return bullet;
+      const vector = DIRS[bullet.dir];
+      return {
+        ...bullet,
+        x: bullet.x + vector.x * game.settings.bulletSpeed,
+        y: bullet.y + vector.y * game.settings.bulletSpeed
+      };
+    })
+    .filter((bullet) => {
+      if (!bullet.predicted || bullet.owner !== changed.id) return true;
+      if (bullet.x < -8 || bullet.y < -8 || bullet.x > WIDTH + 8 || bullet.y > HEIGHT + 8) return false;
+      return !game.blocks.some((block) => rectsOverlap(bullet, block));
+    });
+
+  return {
+    ...game,
+    players,
+    player: players[0],
+    bullets: movedBullets
   };
 }
 

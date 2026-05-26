@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import {
   DEFAULT_SETTINGS,
@@ -6,6 +6,7 @@ import {
   WIDTH,
   drawGame,
   initialGame,
+  predictLocalPlayer,
   stepGame
 } from './gameEngine.js';
 import './styles.css';
@@ -20,6 +21,7 @@ const KEY_MAP = {
   ArrowRight: 'right',
   KeyD: 'right'
 };
+const ONLINE_INPUT_MS = 1000 / 30;
 
 function getWsUrl() {
   if (import.meta.env.VITE_WS_URL) return import.meta.env.VITE_WS_URL;
@@ -40,6 +42,28 @@ function formatRoomCode(value) {
   return value.trim().toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 6);
 }
 
+function blendEntity(previous, next, ratio = 0.45) {
+  if (!previous) return next;
+  return {
+    ...next,
+    x: previous.x + (next.x - previous.x) * ratio,
+    y: previous.y + (next.y - previous.y) * ratio
+  };
+}
+
+function smoothOnlineGame(current, next, localSlot) {
+  if (!current || current.status !== 'playing' || next.status !== 'playing') return next;
+  const findById = (items, id) => items?.find((item) => item.id === id);
+  return {
+    ...next,
+    players: next.players.map((player) => (
+      player.slot === localSlot ? player : blendEntity(findById(current.players, player.id), player)
+    )),
+    enemies: next.enemies.map((enemy) => blendEntity(findById(current.enemies, enemy.id), enemy)),
+    bullets: next.bullets.map((bullet) => blendEntity(findById(current.bullets, bullet.id), bullet, 0.7))
+  };
+}
+
 function TankBattle() {
   const canvasRef = useRef(null);
   const settingsRef = useRef(DEFAULT_SETTINGS);
@@ -47,10 +71,13 @@ function TankBattle() {
   const screenRef = useRef('menu');
   const modeRef = useRef('solo');
   const keysRef = useRef(new Set());
-  const fireRef = useRef(false);
+  const fireQueueRef = useRef(0);
   const animationRef = useRef(null);
   const socketRef = useRef(null);
   const onlineRef = useRef({ roomCode: '', slot: 0, playerToken: '' });
+  const inputSeqRef = useRef(0);
+  const pendingInputsRef = useRef([]);
+  const lastOnlineInputAtRef = useRef(0);
   const [snapshot, setSnapshot] = useState(gameRef.current);
   const [screen, setScreen] = useState('menu');
   const [showDetails, setShowDetails] = useState(false);
@@ -62,15 +89,6 @@ function TankBattle() {
   const [onlineError, setOnlineError] = useState('');
   const [roomInfo, setRoomInfo] = useState(null);
   const [copiedInvite, setCopiedInvite] = useState('');
-
-  const input = useMemo(() => ({
-    p1: {
-      keys: keysRef.current,
-      get fire() {
-        return fireRef.current;
-      }
-    }
-  }), []);
 
   const sendSocket = useCallback((payload) => {
     const socket = socketRef.current;
@@ -84,6 +102,9 @@ function TankBattle() {
     socketRef.current?.close();
     socketRef.current = null;
     onlineRef.current = { roomCode: '', slot: 0, playerToken: '' };
+    pendingInputsRef.current = [];
+    inputSeqRef.current = 0;
+    lastOnlineInputAtRef.current = 0;
     setRoomInfo(null);
     setOnlineStatus('未连接');
   }, [sendSocket]);
@@ -92,7 +113,7 @@ function TankBattle() {
     disconnectOnline(false);
     modeRef.current = 'solo';
     keysRef.current.clear();
-    fireRef.current = false;
+    fireQueueRef.current = 0;
     screenRef.current = 'game';
     setScreen('game');
     gameRef.current = { ...initialGame(settingsRef.current), status: 'playing', message: '' };
@@ -102,7 +123,7 @@ function TankBattle() {
   const backToMenu = useCallback(() => {
     disconnectOnline(true);
     keysRef.current.clear();
-    fireRef.current = false;
+    fireQueueRef.current = 0;
     modeRef.current = 'solo';
     screenRef.current = 'menu';
     setScreen('menu');
@@ -127,6 +148,9 @@ function TankBattle() {
 
   const restartGame = useCallback(() => {
     if (modeRef.current === 'online') {
+      pendingInputsRef.current = [];
+      inputSeqRef.current = 0;
+      fireQueueRef.current = 0;
       sendSocket({ type: 'restart', settings: settingsRef.current });
       return;
     }
@@ -182,6 +206,11 @@ function TankBattle() {
         modeRef.current = 'online';
         screenRef.current = 'game';
         setScreen('game');
+        onlineRef.current = {
+          ...onlineRef.current,
+          roomCode: message.roomCode,
+          slot: message.slot ?? onlineRef.current.slot
+        };
         setRoomInfo((current) => ({
           ...(current ?? {}),
           roomCode: message.roomCode,
@@ -189,9 +218,19 @@ function TankBattle() {
           slot: message.slot ?? current?.slot ?? onlineRef.current.slot,
           shareUrl: `${window.location.origin}${window.location.pathname}?room=${message.roomCode}`
         }));
-        setOnlineStatus(message.statusText ?? '联机中');
-        gameRef.current = message.game;
-        setSnapshot(message.game);
+        const latency = message.ackClientTime ? Math.max(0, Date.now() - message.ackClientTime) : null;
+        const latencyText = latency !== null ? ` · 延迟 ${latency}ms` : '';
+        const latencyWarning = latency !== null && latency > 180 ? ' · 网络延迟较高' : '';
+        setOnlineStatus(`${message.statusText ?? '联机中'}${latencyText}${latencyWarning}`);
+        pendingInputsRef.current = pendingInputsRef.current.filter((item) => item.seq > (message.lastProcessedSeq ?? 0));
+        const slot = message.slot ?? onlineRef.current.slot;
+        const smoothedGame = smoothOnlineGame(gameRef.current, message.game, slot);
+        const predicted = pendingInputsRef.current.reduce(
+          (game, item) => predictLocalPlayer(game, slot, item),
+          smoothedGame
+        );
+        gameRef.current = predicted;
+        setSnapshot(predicted);
       }
 
       if (message.type === 'gameOver') {
@@ -275,7 +314,7 @@ function TankBattle() {
       }
       if (screenRef.current === 'game' && event.code === 'Space') {
         event.preventDefault();
-        fireRef.current = true;
+        if (!event.repeat) fireQueueRef.current += 1;
       }
       if (event.code === 'Enter') {
         event.preventDefault();
@@ -288,7 +327,6 @@ function TankBattle() {
     };
     const up = (event) => {
       if (KEY_MAP[event.code]) keysRef.current.delete(KEY_MAP[event.code]);
-      if (event.code === 'Space') fireRef.current = false;
     };
     window.addEventListener('keydown', down);
     window.addEventListener('keyup', up);
@@ -302,24 +340,47 @@ function TankBattle() {
     const tick = () => {
       const ctx = canvasRef.current?.getContext('2d');
       if (screenRef.current === 'game') {
+        const firePressed = fireQueueRef.current > 0;
         if (modeRef.current === 'solo') {
-          gameRef.current = stepGame(gameRef.current, input);
+          if (firePressed) fireQueueRef.current -= 1;
+          gameRef.current = stepGame(gameRef.current, {
+            p1: {
+              keys: keysRef.current,
+              firePressed
+            }
+          });
           setSnapshot(gameRef.current);
         } else {
-          sendSocket({
-            type: 'input',
-            keys: Array.from(keysRef.current),
-            fire: fireRef.current
-          });
+          const now = performance.now();
+          const shouldSendInput = firePressed || now - lastOnlineInputAtRef.current >= ONLINE_INPUT_MS;
+          if (shouldSendInput) {
+            if (firePressed) fireQueueRef.current -= 1;
+            lastOnlineInputAtRef.current = now;
+            const inputPacket = {
+              seq: inputSeqRef.current + 1,
+              keys: Array.from(keysRef.current),
+              firePressed,
+              clientTime: Date.now()
+            };
+            inputSeqRef.current = inputPacket.seq;
+            const sent = sendSocket({
+              type: 'input',
+              ...inputPacket
+            });
+            if (sent) {
+              pendingInputsRef.current = [...pendingInputsRef.current, inputPacket].slice(-120);
+              gameRef.current = predictLocalPlayer(gameRef.current, onlineRef.current.slot, inputPacket);
+              setSnapshot(gameRef.current);
+            }
+          }
         }
         if (ctx) drawGame(ctx, gameRef.current);
       }
-      fireRef.current = false;
       animationRef.current = requestAnimationFrame(tick);
     };
     animationRef.current = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(animationRef.current);
-  }, [input, sendSocket]);
+  }, [sendSocket]);
 
   useEffect(() => () => disconnectOnline(true), [disconnectOnline]);
 
