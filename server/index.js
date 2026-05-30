@@ -5,6 +5,8 @@ import { DEFAULT_SETTINGS, initialGame, setPlayerConnected, stepGame } from '../
 
 const PORT = Number(process.env.PORT ?? 8787);
 const TICK_MS = 1000 / 30;
+const SNAPSHOT_MS = 1000 / 15;
+const MAX_BUFFERED_BYTES = 64 * 1024;
 const EMPTY_ROOM_TTL = 5 * 60 * 1000;
 const DISCONNECT_TTL = 2 * 60 * 1000;
 const makeRoomCode = customAlphabet('ABCDEFGHJKLMNPQRSTUVWXYZ23456789', 6);
@@ -16,8 +18,16 @@ function send(client, payload) {
   client.socket.send(JSON.stringify(payload));
 }
 
-function broadcast(room, payload) {
-  room.clients.forEach((client) => send(client, payload));
+function sendPayload(client, payload) {
+  if (client.socket.readyState !== 1) return false;
+  if (client.socket.bufferedAmount > MAX_BUFFERED_BYTES) {
+    client.skippedSnapshots = (client.skippedSnapshots ?? 0) + 1;
+    return false;
+  }
+  client.socket.send(JSON.stringify(payload));
+  client.skippedSnapshots = 0;
+  client.lastSnapshotAt = Date.now();
+  return true;
 }
 
 function serializePlayers(room) {
@@ -29,7 +39,33 @@ function serializePlayers(room) {
   }));
 }
 
-function roomSnapshot(room, client) {
+function dynamicGameSnapshot(game, includeBlocks) {
+  const snapshot = {
+    status: game.status,
+    mode: game.mode,
+    level: game.level,
+    score: game.score,
+    lives: game.lives,
+    settings: game.settings,
+    waveLeft: game.waveLeft,
+    nextEnemyId: game.nextEnemyId,
+    spawnCooldown: game.spawnCooldown,
+    message: game.message,
+    players: game.players,
+    enemies: game.enemies,
+    bullets: game.bullets,
+    effects: game.effects
+  };
+  if (includeBlocks) snapshot.blocks = game.blocks;
+  return snapshot;
+}
+
+function blockSignature(game) {
+  return game.blocks.map((block) => block.id).join('|');
+}
+
+function roomSnapshot(room, client, options = {}) {
+  const includeBlocks = Boolean(options.full || client.blockVersion !== room.blockVersion);
   return {
     type: 'snapshot',
     roomCode: room.code,
@@ -37,13 +73,24 @@ function roomSnapshot(room, client) {
     players: serializePlayers(room),
     lastProcessedSeq: room.lastProcessedSeq[client.slot] ?? 0,
     ackClientTime: room.ackClientTime[client.slot] ?? null,
+    serverTime: Date.now(),
+    blockVersion: room.blockVersion,
+    full: includeBlocks,
+    skippedSnapshots: client.skippedSnapshots ?? 0,
     statusText: room.game.status === 'waiting' ? '等待好友加入' : room.game.status === 'paused' ? '队友断线，已暂停' : '联机中',
-    game: room.game
+    game: dynamicGameSnapshot(room.game, includeBlocks)
   };
 }
 
-function broadcastSnapshot(room) {
-  room.clients.forEach((client) => send(client, roomSnapshot(room, client)));
+function sendSnapshot(room, client, options = {}) {
+  const payload = roomSnapshot(room, client, options);
+  const sent = sendPayload(client, payload);
+  if (sent && payload.full) client.blockVersion = room.blockVersion;
+  return sent;
+}
+
+function broadcastSnapshot(room, options = {}) {
+  room.clients.forEach((client) => sendSnapshot(room, client, options));
 }
 
 function makeRoom(settings) {
@@ -64,10 +111,14 @@ function makeRoom(settings) {
     inputs: [{ keys: [], firePressed: false, seq: 0, clientTime: null }, { keys: [], firePressed: false, seq: 0, clientTime: null }],
     lastProcessedSeq: [0, 0],
     ackClientTime: [null, null],
+    blockVersion: 0,
+    blockSignature: '',
     createdAt: Date.now(),
     emptySince: null,
+    lastBroadcastAt: 0,
     timer: null
   };
+  room.blockSignature = blockSignature(room.game);
   rooms.set(code, room);
   room.timer = setInterval(() => tickRoom(room), TICK_MS);
   return room;
@@ -84,6 +135,9 @@ function attachClient(room, client, slot, playerToken) {
   client.room = room;
   client.slot = slot;
   client.playerToken = playerToken;
+  client.blockVersion = -1;
+  client.lastSnapshotAt = 0;
+  client.skippedSnapshots = 0;
   room.players[slot] = { token: playerToken, client, disconnectedAt: null };
   room.clients.add(client);
   room.emptySince = null;
@@ -110,7 +164,7 @@ function createRoom(client, message) {
     players: serializePlayers(room),
     statusText: '等待好友加入'
   });
-  broadcastSnapshot(room);
+  broadcastSnapshot(room, { full: true });
 }
 
 function joinRoom(client, message) {
@@ -135,7 +189,7 @@ function joinRoom(client, message) {
     players: serializePlayers(room),
     statusText: room.game.status === 'waiting' ? '等待好友加入' : '联机中'
   });
-  broadcastSnapshot(room);
+  broadcastSnapshot(room, { full: true });
 }
 
 function restartRoom(client, message) {
@@ -152,7 +206,12 @@ function restartRoom(client, message) {
     status: room.players[0]?.client && room.players[1]?.client ? 'playing' : 'waiting',
     message: room.players[0]?.client && room.players[1]?.client ? '' : '等待好友加入'
   });
-  broadcastSnapshot(room);
+  room.blockVersion += 1;
+  room.blockSignature = blockSignature(room.game);
+  room.clients.forEach((peer) => {
+    peer.blockVersion = -1;
+  });
+  broadcastSnapshot(room, { full: true });
 }
 
 function leaveRoom(client) {
@@ -172,7 +231,7 @@ function leaveRoom(client) {
   if (room.game.status === 'playing') {
     room.game = { ...room.game, status: 'paused', message: '队友断线，等待重连' };
   }
-  broadcastSnapshot(room);
+  broadcastSnapshot(room, { full: true });
 }
 
 function tickRoom(room) {
@@ -204,16 +263,24 @@ function tickRoom(room) {
     p1: room.inputs[0],
     p2: room.inputs[1]
   });
+  const nextBlockSignature = blockSignature(room.game);
+  if (nextBlockSignature !== room.blockSignature) {
+    room.blockVersion += 1;
+    room.blockSignature = nextBlockSignature;
+  }
 
   room.inputs = room.inputs.map((input) => ({ ...input, firePressed: false }));
-  broadcastSnapshot(room);
+  if (now - room.lastBroadcastAt >= SNAPSHOT_MS) {
+    room.lastBroadcastAt = now;
+    broadcastSnapshot(room);
+  }
 
   if (room.game.status === 'over' || room.game.status === 'won') {
-    broadcast(room, {
+    room.clients.forEach((client) => send(client, {
       type: 'gameOver',
       roomCode: room.code,
       statusText: room.game.status === 'won' ? '胜利' : '基地失守'
-    });
+    }));
   }
 }
 

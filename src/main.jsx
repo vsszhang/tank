@@ -64,6 +64,29 @@ function smoothOnlineGame(current, next, localSlot) {
   };
 }
 
+function mergeSnapshotGame(current, incoming) {
+  if (!current || incoming.blocks) return { ...incoming, player: incoming.players?.[0] };
+  return {
+    ...current,
+    ...incoming,
+    blocks: current.blocks,
+    player: incoming.players?.[0] ?? current.player
+  };
+}
+
+function totalEnemies(game) {
+  return game.waveLeft + game.enemies.length;
+}
+
+function shouldPublishSnapshot(previous, next) {
+  return previous.score !== next.score ||
+    previous.lives !== next.lives ||
+    previous.level !== next.level ||
+    previous.status !== next.status ||
+    previous.message !== next.message ||
+    totalEnemies(previous) !== totalEnemies(next);
+}
+
 function TankBattle() {
   const canvasRef = useRef(null);
   const settingsRef = useRef(DEFAULT_SETTINGS);
@@ -78,6 +101,8 @@ function TankBattle() {
   const inputSeqRef = useRef(0);
   const pendingInputsRef = useRef([]);
   const lastOnlineInputAtRef = useRef(0);
+  const lastStatusAtRef = useRef(0);
+  const snapshotRef = useRef(gameRef.current);
   const [snapshot, setSnapshot] = useState(gameRef.current);
   const [screen, setScreen] = useState('menu');
   const [showDetails, setShowDetails] = useState(false);
@@ -89,6 +114,12 @@ function TankBattle() {
   const [onlineError, setOnlineError] = useState('');
   const [roomInfo, setRoomInfo] = useState(null);
   const [copiedInvite, setCopiedInvite] = useState('');
+
+  const publishSnapshot = useCallback((next, force = false) => {
+    if (!force && !shouldPublishSnapshot(snapshotRef.current, next)) return;
+    snapshotRef.current = next;
+    setSnapshot(next);
+  }, []);
 
   const sendSocket = useCallback((payload) => {
     const socket = socketRef.current;
@@ -105,6 +136,7 @@ function TankBattle() {
     pendingInputsRef.current = [];
     inputSeqRef.current = 0;
     lastOnlineInputAtRef.current = 0;
+    lastStatusAtRef.current = 0;
     setRoomInfo(null);
     setOnlineStatus('未连接');
   }, [sendSocket]);
@@ -117,7 +149,7 @@ function TankBattle() {
     screenRef.current = 'game';
     setScreen('game');
     gameRef.current = { ...initialGame(settingsRef.current), status: 'playing', message: '' };
-    setSnapshot(gameRef.current);
+    publishSnapshot(gameRef.current, true);
   }, [disconnectOnline]);
 
   const backToMenu = useCallback(() => {
@@ -128,7 +160,7 @@ function TankBattle() {
     screenRef.current = 'menu';
     setScreen('menu');
     gameRef.current = initialGame(settingsRef.current);
-    setSnapshot(gameRef.current);
+    publishSnapshot(gameRef.current, true);
   }, [disconnectOnline]);
 
   const updateSetting = (key, value) => {
@@ -143,7 +175,7 @@ function TankBattle() {
     if (screenRef.current !== 'game') return;
     if (game.status === 'playing') gameRef.current = { ...game, status: 'paused', message: '已暂停，按 Enter 继续' };
     else if (game.status === 'paused') gameRef.current = { ...game, status: 'playing', message: '' };
-    setSnapshot(gameRef.current);
+    publishSnapshot(gameRef.current, true);
   }, []);
 
   const restartGame = useCallback(() => {
@@ -211,26 +243,42 @@ function TankBattle() {
           roomCode: message.roomCode,
           slot: message.slot ?? onlineRef.current.slot
         };
-        setRoomInfo((current) => ({
-          ...(current ?? {}),
-          roomCode: message.roomCode,
-          players: message.players ?? [],
-          slot: message.slot ?? current?.slot ?? onlineRef.current.slot,
-          shareUrl: `${window.location.origin}${window.location.pathname}?room=${message.roomCode}`
-        }));
-        const latency = message.ackClientTime ? Math.max(0, Date.now() - message.ackClientTime) : null;
-        const latencyText = latency !== null ? ` · 延迟 ${latency}ms` : '';
-        const latencyWarning = latency !== null && latency > 180 ? ' · 网络延迟较高' : '';
-        setOnlineStatus(`${message.statusText ?? '联机中'}${latencyText}${latencyWarning}`);
+        setRoomInfo((current) => {
+          const next = {
+            ...(current ?? {}),
+            roomCode: message.roomCode,
+            players: message.players ?? [],
+            slot: message.slot ?? current?.slot ?? onlineRef.current.slot,
+            shareUrl: `${window.location.origin}${window.location.pathname}?room=${message.roomCode}`
+          };
+          const samePlayers = JSON.stringify(current?.players ?? []) === JSON.stringify(next.players);
+          if (current?.roomCode === next.roomCode && current?.slot === next.slot && current?.shareUrl === next.shareUrl && samePlayers) return current;
+          return next;
+        });
+        const now = Date.now();
+        const serverAckLatency = message.ackClientTime ? Math.max(0, now - message.ackClientTime) : null;
+        const snapshotAge = message.serverTime ? Math.max(0, now - message.serverTime) : null;
+        const ackText = serverAckLatency !== null ? ` · 确认 ${serverAckLatency}ms` : '';
+        const ageText = snapshotAge !== null ? ` · 快照 ${snapshotAge}ms` : '';
+        const queueWarning = snapshotAge !== null && snapshotAge > 1200 ? ' · 同步积压' : '';
+        const networkWarning = serverAckLatency !== null && serverAckLatency > 300 && !queueWarning ? ' · 网络延迟较高' : '';
+        if (now - lastStatusAtRef.current > 1000) {
+          lastStatusAtRef.current = now;
+          setOnlineStatus((current) => {
+            const next = `${message.statusText ?? '联机中'}${ackText}${ageText}${queueWarning}${networkWarning}`;
+            return current === next ? current : next;
+          });
+        }
         pendingInputsRef.current = pendingInputsRef.current.filter((item) => item.seq > (message.lastProcessedSeq ?? 0));
         const slot = message.slot ?? onlineRef.current.slot;
-        const smoothedGame = smoothOnlineGame(gameRef.current, message.game, slot);
+        const mergedGame = mergeSnapshotGame(gameRef.current, message.game);
+        const smoothedGame = smoothOnlineGame(gameRef.current, mergedGame, slot);
         const predicted = pendingInputsRef.current.reduce(
           (game, item) => predictLocalPlayer(game, slot, item),
           smoothedGame
         );
         gameRef.current = predicted;
-        setSnapshot(predicted);
+        publishSnapshot(predicted, Boolean(message.full));
       }
 
       if (message.type === 'gameOver') {
@@ -247,7 +295,7 @@ function TankBattle() {
       if (modeRef.current === 'online') {
         setOnlineStatus('连接已断开');
         gameRef.current = { ...gameRef.current, status: 'paused', message: '联机断开，请返回菜单重连' };
-        setSnapshot(gameRef.current);
+        publishSnapshot(gameRef.current, true);
       }
     });
 
@@ -349,7 +397,7 @@ function TankBattle() {
               firePressed
             }
           });
-          setSnapshot(gameRef.current);
+          publishSnapshot(gameRef.current);
         } else {
           const now = performance.now();
           const shouldSendInput = firePressed || now - lastOnlineInputAtRef.current >= ONLINE_INPUT_MS;
@@ -370,7 +418,7 @@ function TankBattle() {
             if (sent) {
               pendingInputsRef.current = [...pendingInputsRef.current, inputPacket].slice(-120);
               gameRef.current = predictLocalPlayer(gameRef.current, onlineRef.current.slot, inputPacket);
-              setSnapshot(gameRef.current);
+              publishSnapshot(gameRef.current);
             }
           }
         }
@@ -384,7 +432,7 @@ function TankBattle() {
 
   useEffect(() => () => disconnectOnline(true), [disconnectOnline]);
 
-  const totalEnemies = snapshot.waveLeft + snapshot.enemies.length;
+  const totalEnemyCount = totalEnemies(snapshot);
   const isOnline = modeRef.current === 'online';
 
   if (screen === 'menu') {
@@ -508,7 +556,7 @@ function TankBattle() {
           <span>得分 <strong>{snapshot.score}</strong></span>
           <span>生命 <strong>{snapshot.lives}</strong></span>
           <span>关卡 <strong>{snapshot.level}</strong></span>
-          <span>敌军 <strong>{totalEnemies}</strong></span>
+          <span>敌军 <strong>{totalEnemyCount}</strong></span>
         </div>
         <div className="actions">
           <button type="button" onClick={backToMenu}>菜单</button>
