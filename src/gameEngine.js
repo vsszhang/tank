@@ -229,6 +229,7 @@ function fireBullet(tank, owner, options = {}) {
     w: BULLET_SIZE,
     h: BULLET_SIZE,
     dir: tank.dir,
+    sourceId: options.sourceId ?? tank.id,
     predicted: Boolean(options.predicted)
   };
 }

@@ -313,6 +313,11 @@ button:disabled {
   color: #f8fafc;
 }
 
+.classic-action {
+  background: #111827;
+  color: #facc15;
+}
+
 .modal-backdrop {
   position: fixed;
   inset: 0;
@@ -430,6 +435,45 @@ button:disabled {
   padding-bottom: 18px;
 }
 
+.classic-page {
+  background:
+    linear-gradient(rgba(0, 0, 0, 0.82), rgba(0, 0, 0, 0.9)),
+    repeating-linear-gradient(0deg, transparent 0 23px, rgba(255, 255, 255, 0.04) 23px 24px),
+    repeating-linear-gradient(90deg, transparent 0 23px, rgba(255, 255, 255, 0.04) 23px 24px),
+    #030303;
+}
+
+.classic-page .game-topbar {
+  grid-template-columns: minmax(220px, 1fr) auto;
+  grid-template-areas:
+    "classic-logo classic-stats"
+    "classic-actions classic-actions";
+  align-items: start;
+}
+
+.classic-logo {
+  display: block;
+  width: min(420px, 52vw);
+  height: auto;
+  image-rendering: pixelated;
+  filter: drop-shadow(4px 4px 0 #000);
+}
+
+.classic-page .canvas-wrap {
+  border-color: #d1d5db;
+  background: #000;
+  box-shadow: 8px 8px 0 #000;
+}
+
+.classic-page .game-topbar > div:first-child {
+  grid-area: classic-logo;
+}
+
+.classic-page .actions {
+  grid-area: classic-actions;
+  justify-self: end;
+}
+
 .eyebrow {
   margin: 0 0 6px;
   color: #67e8f9;
@@ -480,6 +524,59 @@ h2 {
   color: #f8fafc;
   font-size: 1.35rem;
   line-height: 1.2;
+}
+
+.classic-stats {
+  grid-area: classic-stats;
+  position: relative;
+  display: block;
+  width: clamp(236px, 28vw, 312px);
+  aspect-ratio: 2 / 1;
+  height: auto;
+  padding: 0;
+  background-repeat: no-repeat;
+  background-size: 100% 100%;
+  image-rendering: pixelated;
+  color: #f8fafc;
+  text-shadow: 2px 2px 0 #000;
+}
+
+.classic-stats span {
+  position: absolute;
+  border: 0;
+  text-align: center;
+  font-size: 0.78rem;
+  line-height: 1;
+}
+
+.classic-score {
+  left: 4%;
+  bottom: 12%;
+  width: 28%;
+}
+
+.classic-enemies {
+  left: 34%;
+  bottom: 12%;
+  width: 34%;
+}
+
+.classic-lives {
+  right: 4%;
+  bottom: 12%;
+  width: 24%;
+}
+
+.classic-level {
+  right: 6%;
+  top: 12%;
+  width: 28%;
+}
+
+.classic-stats strong {
+  display: inline;
+  padding-left: 4px;
+  font-size: 1rem;
 }
 
 .actions {
@@ -680,6 +777,27 @@ kbd {
 
   .join-row {
     grid-template-columns: 1fr;
+  }
+
+  .classic-page .game-topbar {
+    grid-template-columns: 1fr;
+    grid-template-areas:
+      "classic-logo"
+      "classic-stats"
+      "classic-actions";
+  }
+
+  .classic-logo {
+    width: min(360px, 100%);
+  }
+
+  .classic-stats {
+    justify-self: start;
+    width: min(312px, 100%);
+  }
+
+  .classic-page .actions {
+    justify-self: stretch;
   }
 }
 

@@ -9,6 +9,15 @@ import {
   predictLocalPlayer,
   stepGame
 } from './gameEngine.js';
+import {
+  createClassicAudio,
+  drawClassicGame,
+  getClassicLogo,
+  getClassicTip,
+  initialClassicGame,
+  playClassicStepSounds,
+  stepClassicGame
+} from './classicMode.js';
 import './styles.css';
 
 const KEY_MAP = {
@@ -22,6 +31,8 @@ const KEY_MAP = {
   KeyD: 'right'
 };
 const ONLINE_INPUT_MS = 1000 / 30;
+const LOCAL_STEP_MS = 1000 / 60;
+const MAX_LOCAL_STEPS = 5;
 
 function getWsUrl() {
   if (import.meta.env.VITE_WS_URL) return import.meta.env.VITE_WS_URL;
@@ -98,6 +109,7 @@ function TankBattle() {
   const animationRef = useRef(null);
   const socketRef = useRef(null);
   const onlineRef = useRef({ roomCode: '', slot: 0, playerToken: '' });
+  const classicAudioRef = useRef(null);
   const inputSeqRef = useRef(0);
   const pendingInputsRef = useRef([]);
   const lastOnlineInputAtRef = useRef(0);
@@ -152,6 +164,19 @@ function TankBattle() {
     publishSnapshot(gameRef.current, true);
   }, [disconnectOnline]);
 
+  const startClassicGame = useCallback(() => {
+    disconnectOnline(false);
+    modeRef.current = 'classic';
+    keysRef.current.clear();
+    fireQueueRef.current = 0;
+    screenRef.current = 'game';
+    setScreen('game');
+    gameRef.current = initialClassicGame();
+    publishSnapshot(gameRef.current, true);
+    if (!classicAudioRef.current) classicAudioRef.current = createClassicAudio();
+    classicAudioRef.current.play('start', { volume: 0.8 });
+  }, [disconnectOnline, publishSnapshot]);
+
   const backToMenu = useCallback(() => {
     disconnectOnline(true);
     keysRef.current.clear();
@@ -186,8 +211,12 @@ function TankBattle() {
       sendSocket({ type: 'restart', settings: settingsRef.current });
       return;
     }
+    if (modeRef.current === 'classic') {
+      startClassicGame();
+      return;
+    }
     startGame();
-  }, [sendSocket, startGame]);
+  }, [sendSocket, startClassicGame, startGame]);
 
   const connectOnline = useCallback((action, roomCode = '') => {
     disconnectOnline(false);
@@ -385,21 +414,41 @@ function TankBattle() {
   }, [pauseGame, restartGame, startGame]);
 
   useEffect(() => {
-    const tick = () => {
+    let lastFrameAt = 0;
+    let localStepRemainder = 0;
+
+    const tick = (frameAt) => {
       const ctx = canvasRef.current?.getContext('2d');
       if (screenRef.current === 'game') {
-        const firePressed = fireQueueRef.current > 0;
-        if (modeRef.current === 'solo') {
-          if (firePressed) fireQueueRef.current -= 1;
-          gameRef.current = stepGame(gameRef.current, {
-            p1: {
-              keys: keysRef.current,
-              firePressed
-            }
-          });
-          publishSnapshot(gameRef.current);
+        if (modeRef.current === 'solo' || modeRef.current === 'classic') {
+          const step = modeRef.current === 'classic' ? stepClassicGame : stepGame;
+          const delta = lastFrameAt ? Math.min(100, frameAt - lastFrameAt) : LOCAL_STEP_MS;
+          localStepRemainder += delta;
+          let steps = 0;
+          let stepped = false;
+
+          while (localStepRemainder >= LOCAL_STEP_MS && steps < MAX_LOCAL_STEPS) {
+            const firePressed = fireQueueRef.current > 0;
+            if (firePressed) fireQueueRef.current -= 1;
+            const before = gameRef.current;
+            const after = step(before, {
+              p1: {
+                keys: keysRef.current,
+                firePressed
+              }
+            });
+            gameRef.current = after;
+            if (modeRef.current === 'classic') playClassicStepSounds(classicAudioRef.current, before, after);
+            localStepRemainder -= LOCAL_STEP_MS;
+            steps += 1;
+            stepped = true;
+          }
+
+          if (steps === MAX_LOCAL_STEPS) localStepRemainder = 0;
+          if (stepped) publishSnapshot(gameRef.current);
         } else {
           const now = performance.now();
+          const firePressed = fireQueueRef.current > 0;
           const shouldSendInput = firePressed || now - lastOnlineInputAtRef.current >= ONLINE_INPUT_MS;
           if (shouldSendInput) {
             if (firePressed) fireQueueRef.current -= 1;
@@ -422,8 +471,14 @@ function TankBattle() {
             }
           }
         }
-        if (ctx) drawGame(ctx, gameRef.current);
+        if (ctx) {
+          if (modeRef.current === 'classic') drawClassicGame(ctx, gameRef.current);
+          else drawGame(ctx, gameRef.current);
+        }
+      } else {
+        localStepRemainder = 0;
       }
+      lastFrameAt = frameAt;
       animationRef.current = requestAnimationFrame(tick);
     };
     animationRef.current = requestAnimationFrame(tick);
@@ -434,6 +489,7 @@ function TankBattle() {
 
   const totalEnemyCount = totalEnemies(snapshot);
   const isOnline = modeRef.current === 'online';
+  const isClassic = modeRef.current === 'classic';
 
   if (screen === 'menu') {
     return (
@@ -463,7 +519,8 @@ function TankBattle() {
             <h1>坦克大战</h1>
             <p className="menu-subtitle">守住基地，击毁敌军，穿过三轮进攻。</p>
             <div className="menu-actions">
-              <button type="button" className="primary-action" onClick={startGame}>开始游戏</button>
+              <button type="button" className="primary-action classic-action" onClick={startClassicGame}>经典 1990</button>
+              <button type="button" className="primary-action" onClick={startGame}>普通游戏</button>
               <button type="button" className="secondary-action" onClick={() => setShowOnline(true)}>联机对战</button>
               <button type="button" className="secondary-action" onClick={() => setShowDetails(true)}>游戏详情</button>
               <button type="button" className="secondary-action" onClick={() => setShowSettings(true)}>设置</button>
@@ -546,18 +603,33 @@ function TankBattle() {
   }
 
   return (
-    <main className="game-shell game-page">
+    <main className={`game-shell game-page${isClassic ? ' classic-page' : ''}`}>
       <section className="game-topbar">
         <div>
-          <p className="eyebrow">{isOnline ? `Room ${roomInfo?.roomCode ?? onlineRef.current.roomCode}` : 'React Canvas Game'}</p>
-          <h1>坦克大战</h1>
+          {isClassic ? (
+            <img className="classic-logo" src={getClassicLogo()} alt="Tank War" />
+          ) : (
+            <>
+              <p className="eyebrow">{isOnline ? `Room ${roomInfo?.roomCode ?? onlineRef.current.roomCode}` : 'React Canvas Game'}</p>
+              <h1>坦克大战</h1>
+            </>
+          )}
         </div>
-        <div className="stats compact-stats" aria-label="游戏状态">
-          <span>得分 <strong>{snapshot.score}</strong></span>
-          <span>生命 <strong>{snapshot.lives}</strong></span>
-          <span>关卡 <strong>{snapshot.level}</strong></span>
-          <span>敌军 <strong>{totalEnemyCount}</strong></span>
-        </div>
+        {isClassic ? (
+          <div className="classic-stats" style={{ backgroundImage: `url(${getClassicTip()})` }} aria-label="游戏状态">
+            <span className="classic-score"><strong>{snapshot.score}</strong></span>
+            <span className="classic-enemies"><strong>{totalEnemyCount}</strong></span>
+            <span className="classic-lives"><strong>{snapshot.lives}</strong></span>
+            <span className="classic-level">关卡 <strong>{snapshot.level}</strong></span>
+          </div>
+        ) : (
+          <div className="stats compact-stats" aria-label="游戏状态">
+            <span>得分 <strong>{snapshot.score}</strong></span>
+            <span>生命 <strong>{snapshot.lives}</strong></span>
+            <span>关卡 <strong>{snapshot.level}</strong></span>
+            <span>敌军 <strong>{totalEnemyCount}</strong></span>
+          </div>
+        )}
         <div className="actions">
           <button type="button" onClick={backToMenu}>菜单</button>
           <button type="button" onClick={restartGame}>重开</button>
